@@ -1,0 +1,37 @@
+version: '2'
+services:
+  postgres:
+    build:
+      context: ../
+      dockerfile: ./tools/Dockerfile-postgres
+    ports:
+      - 5432
+
+  api:
+    build:
+      context: ../
+      dockerfile: ./tools/Dockerfile-api
+    links: 
+      - postgres
+    ports:
+      - 8083:8083
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  scanner:
+    build:
+      context: ../
+      dockerfile: ./tools/Dockerfile-scanner
+    links:
+      - postgres
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+#  runner:
+#    build:
+#      context: ../
+#      dockerfile: ./tools/Dockerfile-runner
+#    links:
+#      - api
