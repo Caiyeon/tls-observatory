@@ -25,9 +25,18 @@ services:
       dockerfile: ./tools/Dockerfile-scanner
     links:
       - postgres
+      - sampleapp
     depends_on:
       - postgres
     restart: unless-stopped
+
+  sampleapp:
+    build:
+      context: .
+      dockerfile: Dockerfile-sample_app
+    ports:
+      - 443
+
 
 #  runner:
 #    build:
