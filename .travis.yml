@@ -20,7 +20,7 @@ script:
 - docker build -t jvehent/tls-observatory-scanner -f tools/Dockerfile-scanner .
 - docker build -t jvehent/tls-observatory-runner -f tools/Dockerfile-runner .
 - docker-compose -f tools/docker-compose.yml up -d
-- docker run --net=host mozilla/tls-observatory tlsobs -targetLevel modern --observatory http://localhost:8083 sampleapp
+- go run tlsobs/main.go --targetLevel modern --observatory http://localhost:8083 sampleapp
 - |
   if [ ! -z "$TRAVIS_TAG" ]; then
     docker login -e="$DOCKER_EMAIL" -u="$DOCKER_USERNAME" -p="$DOCKER_PASSWORD"
