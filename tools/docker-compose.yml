@@ -11,6 +11,7 @@ services:
     build:
       context: ../
       dockerfile: ./tools/Dockerfile-api
+    image: jvehent/tls-observatory-api
     links: 
       - postgres
     ports:
@@ -23,6 +24,7 @@ services:
     build:
       context: ../
       dockerfile: ./tools/Dockerfile-scanner
+    image: jvehent/tls-observatory-scanner
     links:
       - postgres
       - sampleapp
@@ -36,11 +38,10 @@ services:
       dockerfile: Dockerfile-sample_app
     ports:
       - 443
-
-
-#  runner:
-#    build:
-#      context: ../
-#      dockerfile: ./tools/Dockerfile-runner
-#    links:
-#      - api
+  runner:
+    build:
+      context: ../
+      dockerfile: ./tools/Dockerfile-runner
+    image: jvehent/tls-observatory-runner
+    links:
+      - api
