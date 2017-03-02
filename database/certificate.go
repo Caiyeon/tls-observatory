@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/mozilla/tls-observatory/certificate"
 )
 
@@ -40,11 +41,6 @@ func (db *DB) InsertCertificate(cert *certificate.Certificate) (int64, error) {
 	}
 
 	policies, err := json.Marshal(cert.X509v3Extensions.PolicyIdentifiers)
-	if err != nil {
-		return -1, err
-	}
-
-	permittednames, err := json.Marshal(cert.X509v3Extensions.PermittedNames)
 	if err != nil {
 		return -1, err
 	}
@@ -85,39 +81,50 @@ func (db *DB) InsertCertificate(cert *certificate.Certificate) (int64, error) {
 		domainstr = strings.Join(domains, ",")
 	}
 
+	// We want to store an empty array, not NULL
+	if cert.X509v3Extensions.PermittedDNSDomains == nil {
+		cert.X509v3Extensions.PermittedDNSDomains = make([]string, 0)
+	}
+	if cert.X509v3Extensions.ExcludedDNSDomains == nil {
+		cert.X509v3Extensions.ExcludedDNSDomains = make([]string, 0)
+	}
 	err = db.QueryRow(`INSERT INTO certificates(
-					serial_number,
-					sha1_fingerprint,
-					sha256_fingerprint,
-					sha256_subject_spki,
-					pkp_sha256,
-					issuer,
-					subject,
-					version,
-					is_ca,
-					not_valid_before,
-					not_valid_after,
-					first_seen,
-					last_seen,
-					key_alg,
-					key,
-					x509_basicConstraints,
-					x509_crlDistributionPoints,
-					x509_extendedKeyUsage,
-					x509_authorityKeyIdentifier,
-					x509_subjectKeyIdentifier,
-					x509_keyUsage,
-					x509_subjectAltName,
-					x509_certificatePolicies,
-					is_name_constrained,
-					permitted_names,
-					signature_algo,
-					domains,
-					raw_cert
-					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-					$14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
-					$27, $28)
-					RETURNING id`,
+                                       serial_number,
+                                       sha1_fingerprint,
+                                       sha256_fingerprint,
+                                       sha256_subject_spki,
+                                       pkp_sha256,
+                                       issuer,
+                                       subject,
+                                       version,
+                                       is_ca,
+                                       not_valid_before,
+                                       not_valid_after,
+                                       first_seen,
+                                       last_seen,
+                                       key_alg,
+                                       key,
+                                       x509_basicConstraints,
+                                       x509_crlDistributionPoints,
+                                       x509_extendedKeyUsage,
+                                       x509_authorityKeyIdentifier,
+                                       x509_subjectKeyIdentifier,
+                                       x509_keyUsage,
+                                       x509_subjectAltName,
+                                       x509_certificatePolicies,
+                                       signature_algo,
+                                       domains,
+                                       raw_cert,
+                                       permitted_dns_domains,
+                                       permitted_ip_addresses,
+                                       excluded_dns_domains,
+                                       excluded_ip_addresses,
+                                       is_technically_constrained,
+						   cisco_umbrella_rank
+                                       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                                        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
+                                        $27, $28, $29, $30, $31, $32)
+                                        RETURNING id`,
 		cert.Serial,
 		cert.Hashes.SHA1,
 		cert.Hashes.SHA256,
@@ -141,16 +148,26 @@ func (db *DB) InsertCertificate(cert *certificate.Certificate) (int64, error) {
 		keyusage,
 		subaltname,
 		policies,
-		cert.X509v3Extensions.IsNameConstrained,
-		permittednames,
 		cert.SignatureAlgorithm,
 		domainstr,
 		cert.Raw,
+		pq.Array(cert.X509v3Extensions.PermittedDNSDomains),
+		pq.Array(cert.X509v3Extensions.PermittedIPAddresses),
+		pq.Array(cert.X509v3Extensions.ExcludedDNSDomains),
+		pq.Array(cert.X509v3Extensions.ExcludedIPAddresses),
+		cert.X509v3Extensions.IsTechnicallyConstrained,
+		cert.CiscoUmbrellaRank,
 	).Scan(&id)
 	if err != nil {
 		return -1, err
 	}
 	return id, nil
+}
+
+// UpdateCertificateRank updates the rank integer of the input certificate.
+func (db *DB) UpdateCertificateRank(id, rank int64) error {
+	_, err := db.Exec("UPDATE certificates SET cisco_umbrella_rank=$1 WHERE id=$2", rank, id)
+	return err
 }
 
 // UpdateCertLastSeen updates the last_seen timestamp of the input certificate.
@@ -233,7 +250,7 @@ func (db *DB) GetCertIDBySHA1Fingerprint(sha1 string) (id int64, err error) {
 	id = -1
 	err = db.QueryRow(`SELECT id
 				 FROM certificates
-				 WHERE sha1_fingerprint=$1
+				 WHERE sha1_fingerprint=upper($1)
 				 ORDER BY id ASC LIMIT 1`,
 		sha1).Scan(&id)
 	if err == sql.ErrNoRows {
@@ -250,7 +267,7 @@ func (db *DB) GetCertIDBySHA256Fingerprint(sha256 string) (id int64, err error) 
 	id = -1
 	err = db.QueryRow(`SELECT id
 				 FROM certificates
-				 WHERE sha256_fingerprint=$1
+				 WHERE sha256_fingerprint=upper($1)
 				 ORDER BY id ASC LIMIT 1`,
 		strings.ToUpper(sha256)).Scan(&id)
 	if err == sql.ErrNoRows {
@@ -279,14 +296,20 @@ type Scannable interface {
 func (db *DB) scanCert(row Scannable) (certificate.Certificate, error) {
 	cert := certificate.Certificate{}
 
-	var crl_dist_points, extkeyusage, keyusage, subaltname, policies, permittednames, issuer, subject, key []byte
-
+	var crl_dist_points, extkeyusage, keyusage, subaltname, policies, issuer, subject, key []byte
 	err := row.Scan(&cert.ID, &cert.Serial, &cert.Hashes.SHA1, &cert.Hashes.SHA256, &cert.Hashes.SHA256SubjectSPKI, &cert.Hashes.PKPSHA256,
 		&issuer, &subject,
 		&cert.Version, &cert.CA, &cert.Validity.NotBefore, &cert.Validity.NotAfter, &key, &cert.FirstSeenTimestamp,
 		&cert.LastSeenTimestamp, &cert.X509v3BasicConstraints, &crl_dist_points, &extkeyusage, &cert.X509v3Extensions.AuthorityKeyId,
-		&cert.X509v3Extensions.SubjectKeyId, &keyusage, &subaltname, &policies, &cert.X509v3Extensions.IsNameConstrained, &permittednames,
-		&cert.SignatureAlgorithm, &cert.Raw)
+		&cert.X509v3Extensions.SubjectKeyId, &keyusage, &subaltname, &policies,
+		&cert.SignatureAlgorithm, &cert.Raw,
+		pq.Array(&cert.X509v3Extensions.PermittedDNSDomains),
+		pq.Array(&cert.X509v3Extensions.PermittedIPAddresses),
+		pq.Array(&cert.X509v3Extensions.ExcludedDNSDomains),
+		pq.Array(&cert.X509v3Extensions.ExcludedIPAddresses),
+		&cert.X509v3Extensions.IsTechnicallyConstrained,
+		&cert.CiscoUmbrellaRank,
+	)
 	if err != nil {
 		return cert, err
 	}
@@ -316,11 +339,6 @@ func (db *DB) scanCert(row Scannable) (certificate.Certificate, error) {
 		return cert, err
 	}
 
-	err = json.Unmarshal(permittednames, &cert.X509v3Extensions.PermittedNames)
-	if err != nil {
-		return cert, err
-	}
-
 	err = json.Unmarshal(issuer, &cert.Issuer)
 	if err != nil {
 		return cert, err
@@ -343,7 +361,7 @@ func (db *DB) scanCert(row Scannable) (certificate.Certificate, error) {
 // GetCertByID fetches a certain certificate from the database.
 // It returns a pointer to a Certificate struct and any errors that occur.
 func (db *DB) GetCertByID(certID int64) (*certificate.Certificate, error) {
-	row := db.QueryRow(`SELECT ` + strings.Join(allCertificateColumns, ", ") + `
+	row := db.QueryRow(`SELECT `+strings.Join(allCertificateColumns, ", ")+`
 		FROM certificates WHERE id=$1`, certID)
 	cert, err := db.scanCert(row)
 	return &cert, err
@@ -360,7 +378,7 @@ func (db *DB) GetAllCertsInStore(store string) (out []certificate.Certificate, e
 		"apple",
 		"microsoft",
 		"ubuntu":
-		query := fmt.Sprintf(`SELECT ` + strings.Join(allCertificateColumns, ", ") + `
+		query := fmt.Sprintf(`SELECT `+strings.Join(allCertificateColumns, ", ")+`
                     FROM certificates WHERE in_%s_root_store=true`, store)
 		rows, err := db.Query(query)
 		if err != nil {
@@ -377,6 +395,30 @@ func (db *DB) GetAllCertsInStore(store string) (out []certificate.Certificate, e
 	default:
 		return nil, ErrInvalidCertStore
 	}
+}
+
+// GetEECountForIssuerByID gets the count of valid end entity certificates in the
+// database that chain to the certificate with the specified ID
+func (db *DB) GetEECountForIssuerByID(certID int64) (count int64, err error) {
+	count = -1
+	err = db.QueryRow(`
+WITH RECURSIVE issued_by(cert_id, issuer_id) AS (
+	SELECT DISTINCT cert_id, issuer_id
+	FROM trust
+	WHERE issuer_id = $1
+	AND cert_id != issuer_id
+	UNION ALL
+		SELECT trust.cert_id, trust.issuer_id
+		FROM trust
+		JOIN issued_by
+		ON (trust.issuer_id = issued_by.cert_id)
+)
+SELECT count(id) FROM certificates WHERE id IN (
+	SELECT DISTINCT cert_id FROM issued_by
+) AND is_ca = false
+AND not_valid_after > NOW()
+AND not_valid_before < NOW()`, certID).Scan(&count)
+	return
 }
 
 // GetCertBySHA1Fingerprint fetches a certain certificate from the database.
@@ -557,12 +599,20 @@ func (db *DB) GetValidationMapForCert(certID int64) (map[string]certificate.Vali
 	return certificate.GetValidityMap(ubuntu, mozilla, microsoft, apple, android), issuerId, nil
 }
 
+// GetCertPaths returns the various certificates paths from the current cert to roots.
+// It takes a certificate as argument that will be used as the start of the path.
 func (db *DB) GetCertPaths(cert *certificate.Certificate) (paths certificate.Paths, err error) {
+	var ancestors []string
+	return db.getCertPaths(cert, ancestors)
+}
+
+func (db *DB) getCertPaths(cert *certificate.Certificate, ancestors []string) (paths certificate.Paths, err error) {
 	paths.Cert = cert
 	xcert, err := cert.ToX509()
 	if err != nil {
 		return
 	}
+	ancestors = append(ancestors, cert.Hashes.SHA256SubjectSPKI)
 	parents, err := db.GetCACertsBySubject(cert.Issuer)
 	if err != nil {
 		return
@@ -573,6 +623,10 @@ func (db *DB) GetCertPaths(cert *certificate.Certificate) (paths certificate.Pat
 			xparent *x509.Certificate
 		)
 		curPath.Cert = parent
+		if parent.Validity.NotAfter.Before(time.Now()) || parent.Validity.NotBefore.After(time.Now()) {
+			// certificate is not valid, skip it
+			continue
+		}
 		xparent, err = parent.ToX509()
 		if err != nil {
 			return
@@ -586,14 +640,23 @@ func (db *DB) GetCertPaths(cert *certificate.Certificate) (paths certificate.Pat
 			paths.Parents = append(paths.Parents, curPath)
 			continue
 		}
+		isLooping := false
+		for _, ancestor := range ancestors {
+			if ancestor == parent.Hashes.SHA256SubjectSPKI {
+				isLooping = true
+			}
+		}
+		if isLooping {
+			paths.Parents = append(paths.Parents, curPath)
+			continue
+		}
 		// if the parent is not self signed, we grab its own parents
-		curPath, err := db.GetCertPaths(parent)
+		curPath, err := db.getCertPaths(parent, ancestors)
 		if err != nil {
 			continue
 		}
 		paths.Parents = append(paths.Parents, curPath)
 	}
-
 	return
 }
 
@@ -614,7 +677,7 @@ func (db *DB) IsTrustValid(id int64) (bool, error) {
 
 var allCertificateColumns = []string{
 	"id",
- 	"serial_number",
+	"serial_number",
 	"sha1_fingerprint",
 	"sha256_fingerprint",
 	"sha256_subject_spki",
@@ -636,8 +699,12 @@ var allCertificateColumns = []string{
 	"x509_keyUsage",
 	"x509_subjectAltName",
 	"x509_certificatePolicies",
-	"is_name_constrained",
-	"permitted_names",
 	"signature_algo",
 	"raw_cert",
+	"permitted_dns_domains",
+	"permitted_ip_addresses",
+	"excluded_dns_domains",
+	"excluded_ip_addresses",
+	"is_technically_constrained",
+	"cisco_umbrella_rank",
 }

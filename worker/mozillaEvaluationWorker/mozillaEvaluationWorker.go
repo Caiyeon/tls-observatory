@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/mozilla/tls-observatory/certificate"
 	"github.com/mozilla/tls-observatory/connection"
@@ -33,30 +34,29 @@ var sstlsURL = "https://statics.tls.security.mozilla.org/server-side-tls-conf.js
 var sstls ServerSideTLSJson
 var modern, intermediate, old Configuration
 
+var once sync.Once
+
 var log = logger.GetLogger()
 
 func init() {
+	worker.RegisterWorker(workerName, worker.Info{Runner: new(eval), Description: workerDesc})
+}
 
+func loadConfigurations() {
 	err := getConffromURL(sstlsURL)
-
 	if err != nil {
-
-		log.Error(err)
-		log.Error("Could not get tls confs from url - fallback to locally saved configurations")
-
+		log.Warn(err)
+		log.Warn("Could not get tls confs from url - fallback to locally saved configurations")
 		// Try to continue with the locally hosted TLS configurations
 		err = json.Unmarshal([]byte(ServerSideTLSConfiguration), &sstls)
 		if err != nil {
 			log.Error(err)
-			log.Error("Could not load Server Side TLS configuration. Evaluation Worker not available")
-			return
+			panic("Could not load Server Side TLS configuration. Evaluation Worker not available")
 		}
 	}
-
 	modern = sstls.Configurations["modern"]
 	intermediate = sstls.Configurations["intermediate"]
 	old = sstls.Configurations["old"]
-	worker.RegisterWorker(workerName, worker.Info{Runner: new(eval), Description: workerDesc})
 }
 
 // getConffromURL retrieves the json containing the TLS configurations from the specified URL.
@@ -111,6 +111,7 @@ type eval struct {
 // Run implements the worker interface.It is called to get the worker results.
 func (e eval) Run(in worker.Input, resChan chan worker.Result) {
 
+	once.Do(loadConfigurations)
 	res := worker.Result{WorkerName: workerName}
 
 	b, err := Evaluate(in.Connection, in.Certificate)
@@ -691,8 +692,16 @@ func (e eval) AnalysisPrinter(r []byte, targetLevel interface{}) (results []stri
 	}
 	results = append(results, fmt.Sprintf("* Mozilla evaluation: %s", eval.Level))
 	levels := []string{"bad", "old", "intermediate", "modern"}
-	if targetLevel.(string) == "old" || targetLevel.(string) == "intermediate" || targetLevel.(string) == "modern" {
-		levels = []string{"bad", targetLevel.(string)}
+	if targetLevel == nil || targetLevel.(string) == "" {
+		levels = []string{"bad", "modern"}
+	} else {
+		switch targetLevel.(string) {
+		case "old", "intermediate", "modern":
+			levels = []string{"bad", targetLevel.(string)}
+		default:
+			err = fmt.Errorf("Invalid target level %q. Must be old, intermediate or modern.", targetLevel.(string))
+			return
+		}
 	}
 	for _, lvl := range levels {
 		if _, ok := eval.Failures[lvl]; ok && len(eval.Failures[lvl]) > 0 {
@@ -718,7 +727,7 @@ func (e eval) AnalysisPrinter(r []byte, targetLevel interface{}) (results []stri
 			fmt.Sprintf("  - oldest clients: %s", strings.Join(sstls.Configurations[eval.Level].OldestClients, ", ")))
 	}
 	if targetLevel.(string) != "" && eval.Level != targetLevel.(string) {
-		err = fmt.Errorf("Measured level %q does not match target level %q",
+		err = fmt.Errorf("  - measured level is %q and does not match target level %q",
 			eval.Level, targetLevel.(string))
 	}
 	return

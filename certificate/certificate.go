@@ -9,12 +9,14 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"log"
+	"net"
 	"strconv"
 	"strings"
 	"time"
+
+	certconstraints "github.com/mozilla/tls-observatory/certificate/constraints"
 )
 
 const (
@@ -23,29 +25,32 @@ const (
 	Microsoft_TS_name = "Microsoft"
 	Apple_TS_name     = "Apple"
 	Android_TS_name   = "Android"
+
+	Default_Cisco_Umbrella_Rank = 2147483647 // max positive value of postgres integer
 )
 
 type Certificate struct {
 	ID                     int64                     `json:"id"`
-	Serial                 string                    `json:"serialNumber,omitempty"`
+	Serial                 string                    `json:"serialNumber"`
 	ScanTarget             string                    `json:"scanTarget,omitempty"`
 	IPs                    []string                  `json:"ips,omitempty"`
-	Version                int                       `json:"version,omitempty"`
-	SignatureAlgorithm     string                    `json:"signatureAlgorithm,omitempty"`
-	Issuer                 Subject                   `json:"issuer,omitempty"`
-	Validity               Validity                  `json:"validity,omitempty"`
-	Subject                Subject                   `json:"subject,omitempty"`
-	Key                    SubjectPublicKeyInfo      `json:"key,omitempty"`
-	X509v3Extensions       Extensions                `json:"x509v3Extensions,omitempty"`
-	X509v3BasicConstraints string                    `json:"x509v3BasicConstraints,omitempty"`
-	CA                     bool                      `json:"ca,omitempty"`
+	Version                int                       `json:"version"`
+	SignatureAlgorithm     string                    `json:"signatureAlgorithm"`
+	Issuer                 Subject                   `json:"issuer"`
+	Validity               Validity                  `json:"validity"`
+	Subject                Subject                   `json:"subject"`
+	Key                    SubjectPublicKeyInfo      `json:"key"`
+	X509v3Extensions       Extensions                `json:"x509v3Extensions"`
+	X509v3BasicConstraints string                    `json:"x509v3BasicConstraints"`
+	CA                     bool                      `json:"ca"`
 	Analysis               interface{}               `json:"analysis,omitempty"` //for future use...
 	ParentSignature        []string                  `json:"parentSignature,omitempty"`
-	ValidationInfo         map[string]ValidationInfo `json:"validationInfo,omitempty"`
+	ValidationInfo         map[string]ValidationInfo `json:"validationInfo"`
 	FirstSeenTimestamp     time.Time                 `json:"firstSeenTimestamp"`
 	LastSeenTimestamp      time.Time                 `json:"lastSeenTimestamp"`
-	Hashes                 Hashes                    `json:"hashes,omitempty"`
-	Raw                    string                    `json:"Raw,omitempty"`
+	Hashes                 Hashes                    `json:"hashes"`
+	Raw                    string                    `json:"Raw"`
+	CiscoUmbrellaRank      int64                     `json:"ciscoUmbrellaRank"`
 	Anomalies              string                    `json:"anomalies,omitempty"`
 }
 
@@ -84,19 +89,22 @@ type SubjectPublicKeyInfo struct {
 
 //Currently exporting extensions that are already decoded into the x509 Certificate structure
 type Extensions struct {
-	AuthorityKeyId         string   `json:"authorityKeyId,omitempty"`
-	SubjectKeyId           string   `json:"subjectKeyId,omitempty"`
-	KeyUsage               []string `json:"keyUsage,omitempty"`
-	ExtendedKeyUsage       []string `json:"extendedKeyUsage,omitempty"`
-	SubjectAlternativeName []string `json:"subjectAlternativeName,omitempty"`
-	CRLDistributionPoints  []string `json:"crlDistributionPoint,omitempty"`
-	PolicyIdentifiers      []string `json:"policyIdentifiers,omitempty"`
-	IsNameConstrained      bool     `json:"isNameConstrained,omitempty"`
-	PermittedNames         []string `json:"permittedNames,omitempty"`
+	AuthorityKeyId           string   `json:"authorityKeyId"`
+	SubjectKeyId             string   `json:"subjectKeyId"`
+	KeyUsage                 []string `json:"keyUsage"`
+	ExtendedKeyUsage         []string `json:"extendedKeyUsage"`
+	SubjectAlternativeName   []string `json:"subjectAlternativeName"`
+	CRLDistributionPoints    []string `json:"crlDistributionPoint"`
+	PolicyIdentifiers        []string `json:"policyIdentifiers,omitempty"`
+	PermittedDNSDomains      []string `json:"permittedDNSNames,omitempty"`
+	PermittedIPAddresses     []string `json:"permittedIPAddresses,omitempty"`
+	ExcludedDNSDomains       []string `json:"excludedDNSNames,omitempty"`
+	ExcludedIPAddresses      []string `json:"excludedIPAddresses,omitempty"`
+	IsTechnicallyConstrained bool     `json:"isTechnicallyConstrained"`
 }
 
 type X509v3BasicConstraints struct {
-	CA       bool        `json:"ca,omitempty"`
+	CA       bool        `json:"ca"`
 	Analysis interface{} `json:"analysis,omitempty"`
 }
 
@@ -357,20 +365,29 @@ func getCertExtensions(cert *x509.Certificate) Extensions {
 	san = append(san, cert.DNSNames...)
 	crld := make([]string, 0)
 	crld = append(crld, cert.CRLDistributionPoints...)
-	pnames := make([]string, 0)
-	pnames = append(pnames, cert.PermittedDNSDomains...)
-	ext := Extensions{
-		AuthorityKeyId:         base64.StdEncoding.EncodeToString(cert.AuthorityKeyId),
-		SubjectKeyId:           base64.StdEncoding.EncodeToString(cert.SubjectKeyId),
-		KeyUsage:               getKeyUsages(cert),
-		ExtendedKeyUsage:       getExtKeyUsages(cert),
-		PolicyIdentifiers:      getPolicyIdentifiers(cert),
-		SubjectAlternativeName: san,
-		CRLDistributionPoints:  crld,
-		PermittedNames:         pnames,
+	constraints, _ := certconstraints.Get(cert)
+	ipNetSliceToStringSlice := func(in []net.IPNet) []string {
+		out := make([]string, 0)
+		for _, ipnet := range in {
+			out = append(out, ipnet.String())
+		}
+		return out
 	}
-	if len(ext.PermittedNames) > 0 {
-		ext.IsNameConstrained = true
+	permittedIPAddresses := ipNetSliceToStringSlice(constraints.PermittedIPAddresses)
+	excludedIPAddresses := ipNetSliceToStringSlice(constraints.ExcludedIPAddresses)
+	ext := Extensions{
+		AuthorityKeyId:           base64.StdEncoding.EncodeToString(cert.AuthorityKeyId),
+		SubjectKeyId:             base64.StdEncoding.EncodeToString(cert.SubjectKeyId),
+		KeyUsage:                 getKeyUsages(cert),
+		ExtendedKeyUsage:         getExtKeyUsages(cert),
+		PolicyIdentifiers:        getPolicyIdentifiers(cert),
+		SubjectAlternativeName:   san,
+		CRLDistributionPoints:    crld,
+		PermittedDNSDomains:      constraints.PermittedDNSDomains,
+		ExcludedDNSDomains:       constraints.ExcludedDNSDomains,
+		PermittedIPAddresses:     permittedIPAddresses,
+		ExcludedIPAddresses:      excludedIPAddresses,
+		IsTechnicallyConstrained: certconstraints.IsTechnicallyConstrained(cert),
 	}
 	return ext
 }
@@ -441,7 +458,7 @@ func CertToStored(cert *x509.Certificate, parentSignature, domain, ip string, TS
 	stored.IPs = make([]string, 0)
 
 	stored.Version = cert.Version
-	stored.Serial = strings.ToUpper(hex.EncodeToString(cert.SerialNumber.Bytes()))
+	stored.Serial = fmt.Sprintf("%X", cert.SerialNumber)
 	stored.SignatureAlgorithm = SignatureAlgorithm[cert.SignatureAlgorithm]
 
 	stored.Key, err = getPublicKeyInfo(cert)
@@ -502,6 +519,7 @@ func CertToStored(cert *x509.Certificate, parentSignature, domain, ip string, TS
 	stored.Hashes.PKPSHA256 = PKPSHA256Hash(cert)
 
 	stored.Raw = base64.StdEncoding.EncodeToString(cert.Raw)
+	stored.CiscoUmbrellaRank = Default_Cisco_Umbrella_Rank
 
 	return stored
 }

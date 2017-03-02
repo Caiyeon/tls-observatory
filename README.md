@@ -20,6 +20,9 @@ Want the WebUI? Check out [Mozilla's Observatory](https://observatory.mozilla.or
     * [POST /api/v1/certificate](#post-/api/v1/certificate)
     * [GET /api/v1/paths](#get-/api/v1/paths)
     * [GET /api/v1/truststore](#get-/api/v1/truststore)
+    * [GET /api/v1/issuereecount](#get-/api/v1/issuereecount)
+    * [GET /api/v1/__heartbeat__](#get-/api/v1/__heartbeat__)
+    * [GET /api/v1/__stats__](#get-/api/v1/__stats__)
   * [Database Queries](#database-queries)
     * [Find certificates signed by CAs identified by their SHA256 fingerprint](#find-certificates-signed-by-cas-identified-by-their-sha256-fingerprint)
     * [List signature algorithms of trusted certs](#list-signature-algorithms-of-trusted-certs)
@@ -318,6 +321,78 @@ curl https://tls-observatory.services.mozilla.com/api/v1/truststore?store=mozill
 
 **Output**: if `format` is pem, a series of PEM-format certificates. If `format` is json, a json array of certificate objects, each with the same format of `/api/v1/certificate`.
 
+### GET /api/v1/issuereecount
+
+Retrieve the count of end-entity certificates that chain to the specified certificate. This is used to evaluate weight of a given issuer in the web pki.
+
+```bash
+curl https://tls-observatory.services.mozilla.com/api/v1/issuereecount?id=1
+```
+
+**Parameters**:
+
+* `id` is the ID of the certificate to start the path at.
+* `sha256` the hexadecimal checksum of the DER certificate (only if `id` is not
+  provided)
+
+**Output**: a `json` document containing the certificate itself under `issuer` and the count of end-entity certs under `eecount`.
+
+
+### GET /api/v1/__heartbeat__
+
+Returns a 200 OK.
+
+```bash
+curl https://tls-observatory.services.mozilla.com/api/v1/__heartbeat__
+I iz alive.
+```
+
+### GET /api/v1/__stats__
+
+Returns usage statistics in json (default) or text format.
+
+```bash
+curl https://tls-observatory.services.mozilla.com/api/v1/__stats__?format=text
+
+pending scans: 7
+
+last 24 hours
+-------------
+- distinct targets: 21873
+- certs seen:       16459
+- certs added:      7886
+
+hourly scans
+------------
+2017-02-08T15:00:00Z    5
+2017-02-08T14:00:00Z    64
+2017-02-08T13:00:00Z    928
+2017-02-08T12:00:00Z    1969
+2017-02-08T11:00:00Z    1957
+2017-02-08T10:00:00Z    1982
+2017-02-08T09:00:00Z    2013
+2017-02-08T08:00:00Z    2031
+2017-02-08T07:00:00Z    2153
+2017-02-08T06:00:00Z    1860
+2017-02-08T05:00:00Z    1869
+2017-02-08T04:00:00Z    1944
+2017-02-08T03:00:00Z    1959
+2017-02-08T02:00:00Z    907
+2017-02-08T01:00:00Z    32
+2017-02-08T00:00:00Z    55
+2017-02-07T23:00:00Z    41
+2017-02-07T22:00:00Z    46
+2017-02-07T21:00:00Z    60
+2017-02-07T20:00:00Z    76
+2017-02-07T19:00:00Z    66
+2017-02-07T18:00:00Z    67
+2017-02-07T17:00:00Z    56
+```
+
+## Database Queries
+
+### Find certificates signed by CAs identified by their SHA256 fingerprint
+
 ## Database Queries
 
 ### Find certificates signed by CAs identified by their SHA256 fingerprint
@@ -360,6 +435,21 @@ GROUP BY date_trunc('year', not_valid_after),
          date_trunc('month', not_valid_after)
 ORDER BY date_trunc('year', not_valid_after) ASC,
          date_trunc('month', not_valid_after) ASC;
+```
+
+### Count valid SHA-1 certs seen over the last 2 weeks on TOP1M sites
+
+```sql
+SELECT  distinct(certificates.id), domains, not_valid_before, not_valid_after, cisco_umbrella_rank
+FROM    certificates
+    INNER JOIN trust ON (certificates.id=trust.cert_id)
+WHERE is_ca='false'
+    AND trust.trusted_mozilla='true'
+    AND signature_algo='SHA1WithRSA'
+    AND cisco_umbrella_rank > 1000000
+    AND last_seen > NOW() - INTERVAL '2 weeks'
+    AND not_valid_after > NOW()
+ORDER BY cisco_umbrella_rank ASC;
 ```
 
 ### List issuer, subject and SAN of Mozilla|Firefox certs not issued by Digicert

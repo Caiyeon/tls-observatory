@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -27,7 +28,7 @@ type Scan struct {
 	Validation_error string                 `json:"validation_error,omitempty"`
 	Complperc        int                    `json:"completion_perc"`
 	Conn_info        connection.Stored      `json:"connection_info"`
-	AnalysisResults  []Analysis             `json:"analysis,omitempty"`
+	AnalysisResults  Analyses               `json:"analysis,omitempty"`
 	Ack              bool                   `json:"ack"`
 	Attempts         int                    `json:"attempts"` //number of retries
 	AnalysisParams   map[string]interface{} `json:"analysis_params"`
@@ -40,10 +41,28 @@ type Analysis struct {
 	Success  bool            `json:"success"`
 }
 
+type Analyses []Analysis
+
+// Methods used for the sorting of analyses
+
+func (slice Analyses) Len() int {
+	return len(slice)
+}
+
+func (slice Analyses) Less(i, j int) bool {
+	return slice[i].Analyzer < slice[j].Analyzer
+}
+
+func (slice Analyses) Swap(i, j int) {
+	slice[i], slice[j] = slice[j], slice[i]
+}
+
 func RegisterConnection(dbname, user, password, hostport, sslmode string) (*DB, error) {
 
-	url := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=%s",
-		user, password, hostport, dbname, sslmode)
+	userPass := url.UserPassword(user, password)
+
+	url := fmt.Sprintf("postgres://%s@%s/%s?sslmode=%s",
+		userPass.String(), hostport, dbname, sslmode)
 
 	db, err := sql.Open("postgres", url)
 

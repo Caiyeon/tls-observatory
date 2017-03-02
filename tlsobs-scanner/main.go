@@ -89,24 +89,29 @@ func main() {
 		conf.General.PostgresUser,
 		conf.General.PostgresPass,
 		conf.General.Postgres,
-		"disable")
+		dbtls)
 	Setup(conf)
 
 	activeScanners := 0
-	for scanID := range incomingScans {
-		// wait until we have an available scanner
-		for {
-			if activeScanners >= conf.General.MaxProc {
-				time.Sleep(time.Second)
-			} else {
-				break
+	for {
+		select {
+		case scanID := <-incomingScans:
+			// new scan, send it to the first available scanner
+			for {
+				if activeScanners >= conf.General.MaxProc {
+					time.Sleep(time.Second)
+				} else {
+					break
+				}
 			}
+			go func() {
+				activeScanners++
+				scan(scanID, cipherscan)
+				activeScanners--
+			}()
+		case <-time.After(conf.General.Timeout * time.Minute):
+			log.Fatalf("No new scan received in %d minutes, shutting down", conf.General.Timeout)
 		}
-		go func() {
-			activeScanners++
-			scan(scanID, cipherscan)
-			activeScanners--
-		}()
 	}
 }
 
@@ -213,6 +218,7 @@ func scan(scanID int64, cipherscan string) {
 		log.WithFields(logrus.Fields{
 			"scan_id": scanID,
 			"cert_id": certID,
+			"err":     err,
 		}).Error("Could not get certificate from db to pass to workers")
 		return
 	}

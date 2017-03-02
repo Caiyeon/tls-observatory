@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -22,6 +23,10 @@ var scanRefreshRate float64
 
 type scanResponse struct {
 	ID int64 `json:"scan_id"`
+}
+
+func IndexHandler(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/static/index.html", http.StatusFound)
 }
 
 // ScanHandler handles the /scans endpoint of the api
@@ -157,6 +162,9 @@ func ResultHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// display the analysis results in alphabetical order of worker name
+	sort.Sort(scan.AnalysisResults)
+
 	jsScan, err := json.Marshal(scan)
 	if err != nil {
 		httpError(w, r, http.StatusInternalServerError,
@@ -220,14 +228,14 @@ func PostCertificateHandler(w http.ResponseWriter, r *http.Request) {
 	_, certHeader, err := r.FormFile("certificate")
 	if err != nil {
 		httpError(w, r, http.StatusBadRequest,
-			fmt.Sprintf("Could not read certificate from form data: %v", err))
+			fmt.Sprintf("Could not read certificate from request: %v", err))
 		return
 	}
 
 	certReader, err := certHeader.Open()
 	if err != nil {
 		httpError(w, r, http.StatusBadRequest,
-			fmt.Sprintf("Could not read certificate from form data: %v", err))
+			fmt.Sprintf("Could not open certificate from form data: %v", err))
 		return
 	}
 
@@ -431,6 +439,70 @@ func TruststoreHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// IssuerEECount contains a certificate and the count of end-entity certs
+// it has issued
+type IssuerEECount struct {
+	Issuer  *certificate.Certificate `json:"issuer"`
+	EECount int64                    `json:"eecount"`
+}
+
+// IssuerEECountHandler handles the /issuereecount endpoint of the api.
+// It queries the database for a count of end-entity certs which chain via the
+// given certificate.
+// It takes the following HTTP parameter:
+//     sha256 - a hex encoded sha256 certificate fingerprint
+func IssuerEECountHandler(w http.ResponseWriter, r *http.Request) {
+	var (
+		err           error
+		id            int64
+		issuerEECount IssuerEECount
+	)
+	val := r.Context().Value(ctxDBKey)
+	if val == nil {
+		httpError(w, r, http.StatusInternalServerError,
+			fmt.Sprintf("Could not find database handler in request context"))
+		return
+	}
+	db := val.(*pg.DB)
+	if r.FormValue("id") != "" {
+		id, err = strconv.ParseInt(r.FormValue("id"), 10, 64)
+		if err != nil {
+			httpError(w, r, http.StatusBadRequest,
+				fmt.Sprintf("Could not parse certificate id: %v", err))
+			return
+		}
+	} else if r.FormValue("sha256") != "" {
+		id, err = db.GetCertIDBySHA256Fingerprint(r.FormValue("sha256"))
+		if err != nil {
+			httpError(w, r, http.StatusInternalServerError,
+				fmt.Sprintf("Could not retrieve certificate: %v", err))
+			return
+		}
+	} else {
+		httpError(w, r, http.StatusBadRequest, "Certificate ID or SHA256 are missing")
+		return
+	}
+	issuerEECount.EECount, err = db.GetEECountForIssuerByID(id)
+	if err != nil {
+		httpError(w, r, http.StatusInternalServerError,
+			fmt.Sprintf("Unable to retrieve statistics for the given issuer"))
+	}
+	issuerEECount.Issuer, err = db.GetCertByID(id)
+	if err != nil {
+		httpError(w, r, http.StatusInternalServerError,
+			fmt.Sprintf("Could not retrieved stored certificate from database: %v", err))
+		return
+	}
+	issuerEEData, err := json.Marshal(issuerEECount)
+	if err != nil {
+		httpError(w, r, http.StatusInternalServerError,
+			fmt.Sprintf("Unable to marshal certificate IDs"))
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(issuerEEData)
+	return
+}
+
 func jsonCertFromID(w http.ResponseWriter, r *http.Request, id int64) {
 	val := r.Context().Value(ctxDBKey)
 	if val == nil {
@@ -460,6 +532,103 @@ func jsonCertFromID(w http.ResponseWriter, r *http.Request, id int64) {
 		w.WriteHeader(http.StatusCreated)
 	}
 	w.Write(certJson)
+}
+
+type Statistics struct {
+	Scans                         int64                 `json:"scans"`
+	Trusts                        int64                 `json:"trusts"`
+	Analyses                      int64                 `json:"analyses"`
+	Certificates                  int64                 `json:"certificates"`
+	PendingScans                  int64                 `json:"pendingScansCount"`
+	Last24HoursScans              []pg.HourlyScansCount `json:"last24HoursScansCount"`
+	DistinctTargetsLast24Hours    int64                 `json:"distinctTargetsLast24Hours"`
+	DistinctCertsSeenLast24Hours  int64                 `json:"distinctCertsSeenLast24Hours"`
+	DistinctCertsAddedLast24Hours int64                 `json:"distinctCertsAddedLast24Hours"`
+}
+
+func StatsHandler(w http.ResponseWriter, r *http.Request) {
+	var (
+		stats Statistics
+		err   error
+	)
+	val := r.Context().Value(ctxDBKey)
+	if val == nil {
+		httpError(w, r, http.StatusInternalServerError,
+			fmt.Sprintf("Could not find database handler in request context"))
+		return
+	}
+	db := val.(*pg.DB)
+	stats.Scans, stats.Trusts, stats.Analyses, stats.Certificates, err = db.CountTableEntries()
+	if err != nil {
+		httpError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve count of entries: %v", err))
+		return
+	}
+	stats.PendingScans, err = db.CountPendingScans()
+	if err != nil {
+		httpError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve count of pending scans: %v", err))
+		return
+	}
+	stats.Last24HoursScans, err = db.CountLast24HoursScans()
+	if err != nil {
+		httpError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve hourly count of scans over last 24 hours: %v", err))
+		return
+	}
+	stats.DistinctTargetsLast24Hours, err = db.CountDistinctTargetsLast24Hours()
+	if err != nil {
+		httpError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve count of distinct targets over last 24 hours: %v", err))
+		return
+	}
+	stats.DistinctCertsSeenLast24Hours, err = db.CountDistinctCertsSeenLast24Hours()
+	if err != nil {
+		httpError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve count of distinct certs seen over last 24 hours: %v", err))
+		return
+	}
+	stats.DistinctCertsAddedLast24Hours, err = db.CountDistinctCertsAddedLast24Hours()
+	if err != nil {
+		httpError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve count of distinct certs added over last 24 hours: %v", err))
+		return
+	}
+	switch r.FormValue("format") {
+	case "text":
+		var buffer bytes.Buffer
+		buffer.Write([]byte(fmt.Sprintf(`
+Totals
+-------------
+scans:              %d
+trust relations:    %d
+analyses:           %d
+certificates:       %d
+
+Queue
+-------------
+pending scans:      %d
+
+last 24 hours
+-------------
+- distinct targets: %d
+- certs seen:       %d
+- certs added:      %d
+
+hourly scans
+------------`, stats.Scans, stats.Trusts, stats.Analyses, stats.Certificates,
+			stats.PendingScans, stats.DistinctTargetsLast24Hours,
+			stats.DistinctCertsSeenLast24Hours, stats.DistinctCertsAddedLast24Hours)))
+		for _, hsc := range stats.Last24HoursScans {
+			buffer.Write([]byte(fmt.Sprintf("\n%s    %d", hsc.Hour.Format(time.RFC3339), hsc.Count)))
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		buffer.WriteTo(w)
+	default:
+		data, err := json.Marshal(stats)
+		if err != nil {
+			httpError(w, r, http.StatusInternalServerError, "Could not marshal statistics")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(data)
+	}
 }
 
 func PreflightHandler(w http.ResponseWriter, r *http.Request) {

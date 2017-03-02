@@ -37,6 +37,12 @@ type Routes []Route
 
 var routes = Routes{
 	Route{
+		"Index",
+		"GET",
+		"/",
+		IndexHandler,
+	},
+	Route{
 		"Scan",
 		"POST",
 		"/api/v1/scan",
@@ -72,6 +78,12 @@ var routes = Routes{
 		"/api/v1/truststore",
 		TruststoreHandler,
 	},
+	Route{
+		"IssuerEECount",
+		"GET",
+		"/api/v1/issuereecount",
+		IssuerEECountHandler,
+	},
 	// CORS preflight endpoints
 	Route{
 		"CORS Preflight",
@@ -104,9 +116,21 @@ var routes = Routes{
 		PreflightHandler,
 	},
 	Route{
+		"CORS Preflight",
+		"OPTIONS",
+		"/api/v1/issuereecount",
+		PreflightHandler,
+	},
+	Route{
 		"Heartbeat",
 		"GET",
 		"/api/v1/__heartbeat__",
 		HeartbeatHandler,
+	},
+	Route{
+		"Statistics",
+		"GET",
+		"/api/v1/__stats__",
+		StatsHandler,
 	},
 }
